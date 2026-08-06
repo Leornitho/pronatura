@@ -7,6 +7,7 @@ const EGRID = 'EGRID';
 const Name = 'Name';
 const Layer = 'Layer';
 const GeoJSON = 'GeoJSON';
+const Label = 'Label';
 
 // ---- Swiss coordinate system (CH1903+ / LV95) ------------------------------------
 proj4.defs('EPSG:2056', '+proj=somerc +lat_0=46.9524055555556 +lon_0=7.43958333333333 +k_0=1 +x_0=2600000 +y_0=1200000 +ellps=bessel +towgs84=674.374,15.056,405.346,0,0,0,0 +units=m +no_defs');
@@ -138,6 +139,7 @@ function mapRecord(rec, mappings) {
       name: mappings[Name] ? rec[mappings[Name]] : null,
       layer: mappings[Layer] ? rec[mappings[Layer]] : null,
       geojson: mappings[GeoJSON] ? rec[mappings[GeoJSON]] : null,
+      label: mappings[Label] ? rec[mappings[Label]] : null,
     };
   }
   // Fallback for widgets configured before column mapping existed.
@@ -147,6 +149,7 @@ function mapRecord(rec, mappings) {
     name: rec[Name] ?? null,
     layer: rec[Layer] ?? null,
     geojson: rec[GeoJSON] ?? null,
+    label: rec[Label] ?? null,
   };
 }
 
@@ -182,14 +185,20 @@ function renderMap(mapped) {
       currentGroups[groupName] = L.featureGroup().addTo(map);
     }
 
-    const label = rec.name ? `${rec.name} (${rec.egrid})` : rec.egrid;
+    const popupText = rec.name ? `${rec.name} (${rec.egrid})` : rec.egrid;
     const featureLayer = L.geoJSON({
       type: 'Feature',
-      properties: { EGRID: rec.egrid, Name: rec.name, Layer: rec.layer },
+      properties: { EGRID: rec.egrid, Name: rec.name, Layer: rec.layer, Label: rec.label },
       geometry
     }, {
       style: { color: colorForLayer(groupName), weight: 2, fillOpacity: 0.25 }
-    }).bindPopup(label);
+    }).bindPopup(popupText);
+
+    if (rec.label) {
+      featureLayer.bindTooltip(String(rec.label), {
+        permanent: true, direction: 'center', className: 'parcel-label'
+      });
+    }
 
     currentGroups[groupName].addLayer(featureLayer);
     recordLayers[rec.id] = featureLayer;
@@ -296,6 +305,7 @@ grist.ready({
     { name: EGRID, type: 'Text', title: 'EGRID', description: 'Identifiant fédéral de la parcelle (ex: CH772637125650)' },
     { name: Name, type: 'Any', title: 'Nom', optional: true, description: 'Nom affiché dans la popup (ex: nom de la réserve ou n° de parcelle)' },
     { name: Layer, type: 'Any', title: 'Réserve', optional: true, description: 'Regroupe les parcelles par réserve/calque, activable/désactivable sur la carte' },
+    { name: Label, type: 'Any', title: 'Étiquette', optional: true, description: 'Texte affiché en permanence sur la parcelle (ex: nom de la réserve)' },
     { name: GeoJSON, type: 'Text', title: 'GeoJSON (cache)', optional: true, description: 'Colonne de cache : la géométrie récupérée depuis le géoportail suisse y est enregistrée pour éviter de la re-télécharger à chaque ouverture' },
   ],
   requiredAccess: 'full',
