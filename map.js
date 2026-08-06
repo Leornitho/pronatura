@@ -67,9 +67,11 @@ function convertGeometryToGeoJSON(geometry) {
   };
 }
 
+const CADASTRAL_LAYER = 'ch.kantone.cadastralwebmap-farbe';
+
 // Returns a GeoJSON geometry (already reprojected to WGS84) for the given EGRID.
 async function fetchParcelGeometry(egrid) {
-  const searchUrl = `https://api3.geo.admin.ch/rest/services/api/SearchServer?searchText=${encodeURIComponent(egrid)}&origins=ch.kantone.cadastralparcel&sr=2056&lang=fr&limit=1`;
+  const searchUrl = `https://api3.geo.admin.ch/rest/services/api/SearchServer?searchText=${encodeURIComponent(egrid)}&type=locations&origins=parcel&sr=2056&lang=fr&limit=1`;
   const searchRes = await fetch(searchUrl);
   const searchJson = await searchRes.json();
   const result = searchJson.results?.[0];
@@ -89,11 +91,12 @@ async function fetchParcelGeometry(egrid) {
 
   const identifyUrl = [
     `https://api3.geo.admin.ch/rest/services/ech/MapServer/identify`,
-    `?geometry=${centerX},${centerY}`,
+    `?geometryType=esriGeometryPoint`,
+    `&geometry=${centerX},${centerY}`,
     `&geometryFormat=geojson`,
     `&sr=2056`,
     `&imageDisplay=400,400,96`,
-    `&layers=all:ch.kantone.cadastralparcel`,
+    `&layers=all:${CADASTRAL_LAYER}`,
     `&mapExtent=${mapExtent}`,
     `&tolerance=1`,
     `&returnGeometry=true`
@@ -101,7 +104,10 @@ async function fetchParcelGeometry(egrid) {
 
   const identRes = await fetch(identifyUrl);
   const identJson = await identRes.json();
-  const feature = identJson.results?.[0];
+  const results = identJson.results || [];
+  // identify can return multiple overlapping features (e.g. neighbouring parcels
+  // sharing the search point) — pick the one whose EGRID actually matches.
+  const feature = results.find(f => f.properties?.egris_egrid === egrid) || results[0];
   if (!feature?.geometry) {
     throw new Error(`Aucune géométrie trouvée pour ${egrid}`);
   }
