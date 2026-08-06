@@ -1,0 +1,34 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Pronatura - Carte des parcelles</title>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" integrity="sha256-o9N1j7kRk38Hzt3AqFZ1qtsTrHsKztw2h1g1Z6Z9GIQ=" crossorigin="" />
+  <style>
+    html, body { margin: 0; height: 100%; font-family: Arial, sans-serif; }
+    #toolbar {
+      display: flex; align-items: center; gap: 12px;
+      padding: 8px 12px; background: #fff; box-shadow: 0 0 8px rgba(0,0,0,.1);
+      position: relative; z-index: 1000;
+    }
+    #toolbar button { padding: 6px 14px; font-size: 0.9rem; cursor: pointer; }
+    #toolbar button:disabled { cursor: default; opacity: 0.6; }
+    #status { color: #333; font-size: 0.85rem; }
+    #status.loading { color: #0066cc; }
+    #status.error { color: #c0392b; }
+    #map { width: 100%; height: calc(100% - 42px); }
+  </style>
+</head>
+<body>
+  <div id="toolbar">
+    <button id="refresh">Actualiser depuis le géoportail</button>
+    <span id="status"></span>
+  </div>
+  <div id="map"></div>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/proj4js/2.8.0/proj4.js" integrity="sha512-T+hzYmxstxQNfJn0CI+r8LVPU3s9co+k3PNkqPaqmd/0E0Cz4vYq+qoW38y8jzXTyS0G0O7TcbkUD1zYraCcNw==" crossorigin="anonymous" referrerpolicy="no-referrer"></script>
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" integrity="sha256-o72bt9xQpe0ULwLyXFm9v33Ck5LID2wOQ+Pq8Y8nL0k=" crossorigin=""></script>
+  <script src="https://docs.getgrist.com/grist-plugin-api.js"></script>
+  <script src="map.js"></script>
+</body>
+</html>
