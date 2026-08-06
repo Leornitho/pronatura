@@ -264,14 +264,16 @@ function renderMap(mapped) {
       currentGroups[groupName] = L.featureGroup().addTo(map);
     }
 
-    const popupText = rec.name ? `${rec.name} (${egridDisplay})` : egridDisplay;
     const featureLayer = L.geoJSON({
       type: 'Feature',
       properties: { EGRID: egridDisplay, Name: rec.name, Layer: rec.layer, Label: rec.label },
       geometry
     }, {
       style: { color: colorForLayer(groupName), weight: 2, fillOpacity: 0.25 }
-    }).bindPopup(popupText);
+    });
+    if (rec.name) {
+      featureLayer.bindPopup(String(rec.name));
+    }
 
     if (rec.label) {
       // A centroid marker (rather than binding the tooltip on featureLayer directly)
