@@ -135,7 +135,7 @@ function mapRecord(rec, mappings) {
   if (mappings) {
     return {
       id: rec.id,
-      egrid: mappings[EGRID] ? rec[mappings[EGRID]] : null,
+      egridRaw: mappings[EGRID] ? rec[mappings[EGRID]] : null,
       name: mappings[Name] ? rec[mappings[Name]] : null,
       layer: mappings[Layer] ? rec[mappings[Layer]] : null,
       geojson: mappings[GeoJSON] ? rec[mappings[GeoJSON]] : null,
@@ -145,12 +145,90 @@ function mapRecord(rec, mappings) {
   // Fallback for widgets configured before column mapping existed.
   return {
     id: rec.id,
-    egrid: rec[EGRID] ?? null,
+    egridRaw: rec[EGRID] ?? null,
     name: rec[Name] ?? null,
     layer: rec[Layer] ?? null,
     geojson: rec[GeoJSON] ?? null,
     label: rec[Label] ?? null,
   };
+}
+
+// The EGRID field can be mapped to a Text column (one EGRID, or several
+// separated by commas/semicolons/newlines) or to a Ref/RefList column
+// pointing at a parcels table that itself has an "EGRID" column. This is
+// resolved once per data load and cached until the mapping changes.
+let egridKindCache = null; // { key, kind: 'text' | 'ref', refTableId }
+
+async function getEgridMappingKind() {
+  const colId = lastMappings && lastMappings[EGRID];
+  const key = `${selectedTableId}:${colId}`;
+  if (egridKindCache?.key === key) { return egridKindCache; }
+  if (!selectedTableId || !colId) {
+    egridKindCache = { key, kind: 'text' };
+    return egridKindCache;
+  }
+  try {
+    const [tables, columns] = await Promise.all([
+      grist.docApi.fetchTable('_grist_Tables'),
+      grist.docApi.fetchTable('_grist_Tables_column'),
+    ]);
+    const tableRef = tables.id[tables.tableId.indexOf(selectedTableId)];
+    const idx = columns.id.findIndex((_, i) => columns.parentId[i] === tableRef && columns.colId[i] === colId);
+    const type = idx !== -1 ? (columns.type[idx] || 'Text') : 'Text';
+    if (type.startsWith('Ref:') || type.startsWith('RefList:')) {
+      const refTableId = type.startsWith('Ref:') ? type.slice(4) : type.slice(8);
+      egridKindCache = { key, kind: 'ref', refTableId };
+    } else {
+      egridKindCache = { key, kind: 'text' };
+    }
+  } catch (e) {
+    console.error('Impossible de déterminer le type de la colonne EGRID :', e);
+    egridKindCache = { key, kind: 'text' };
+  }
+  return egridKindCache;
+}
+
+let refEgridMapCache = null; // { refTableId, map: {rowId: egrid} }
+
+// Fetches the referenced parcels table and indexes it by row id -> EGRID
+// value (the referenced table must have a column with colId "EGRID").
+async function getRefTableEgridMap(refTableId, forceRefresh) {
+  if (!forceRefresh && refEgridMapCache?.refTableId === refTableId) { return refEgridMapCache.map; }
+  const table = await grist.docApi.fetchTable(refTableId);
+  const map = {};
+  if (table?.id && table[EGRID]) {
+    for (let i = 0; i < table.id.length; i++) {
+      map[table.id[i]] = table[EGRID][i];
+    }
+  } else {
+    console.error(`La table référencée "${refTableId}" ne contient pas de colonne "EGRID".`);
+  }
+  refEgridMapCache = { refTableId, map };
+  return map;
+}
+
+function parseEgridText(value) {
+  if (value == null) { return []; }
+  return String(value).split(/[\n,;]+/).map(v => v.trim()).filter(Boolean);
+}
+
+// Populates rec.egridList (array of EGRID strings) on every record, resolving
+// either a delimited text value or Ref/RefList row ids against the parcels table.
+async function resolveEgridLists(mapped, forceRefresh) {
+  const kindInfo = await getEgridMappingKind();
+  let refMap = null;
+  if (kindInfo.kind === 'ref') {
+    refMap = await getRefTableEgridMap(kindInfo.refTableId, forceRefresh);
+  }
+  for (const rec of mapped) {
+    if (kindInfo.kind === 'ref') {
+      const raw = rec.egridRaw;
+      const rowIds = Array.isArray(raw) ? raw.slice(1) : (typeof raw === 'number' ? [raw] : []);
+      rec.egridList = rowIds.map(id => refMap[id]).filter(Boolean);
+    } else {
+      rec.egridList = parseEgridText(rec.egridRaw);
+    }
+  }
 }
 
 function clearMap() {
@@ -175,29 +253,36 @@ function renderMap(mapped) {
     try {
       geometry = typeof rec.geojson === 'string' ? JSON.parse(rec.geojson) : rec.geojson;
     } catch (e) {
-      console.error(`GeoJSON invalide pour la ligne ${rec.id} (${rec.egrid})`, e);
+      console.error(`GeoJSON invalide pour la ligne ${rec.id} (${(rec.egridList || []).join(', ')})`, e);
       continue;
     }
     if (!geometry) continue;
 
+    const egridDisplay = (rec.egridList || []).join(', ');
     const groupName = rec.layer ? String(rec.layer) : 'Parcelles';
     if (!currentGroups[groupName]) {
       currentGroups[groupName] = L.featureGroup().addTo(map);
     }
 
-    const popupText = rec.name ? `${rec.name} (${rec.egrid})` : rec.egrid;
+    const popupText = rec.name ? `${rec.name} (${egridDisplay})` : egridDisplay;
     const featureLayer = L.geoJSON({
       type: 'Feature',
-      properties: { EGRID: rec.egrid, Name: rec.name, Layer: rec.layer, Label: rec.label },
+      properties: { EGRID: egridDisplay, Name: rec.name, Layer: rec.layer, Label: rec.label },
       geometry
     }, {
       style: { color: colorForLayer(groupName), weight: 2, fillOpacity: 0.25 }
     }).bindPopup(popupText);
 
     if (rec.label) {
-      featureLayer.bindTooltip(String(rec.label), {
-        permanent: true, direction: 'center', className: 'parcel-label'
-      });
+      // A centroid marker (rather than binding the tooltip on featureLayer directly)
+      // keeps exactly one label per row even when its geometry is a GeometryCollection
+      // combining several parcels — bindTooltip on a multi-sublayer group would repeat
+      // the label once per sublayer.
+      const labelMarker = L.marker(featureLayer.getBounds().getCenter(), {
+        icon: L.divIcon({ className: '', iconSize: [0, 0] }),
+        interactive: false,
+      }).bindTooltip(String(rec.label), { permanent: true, direction: 'center', className: 'parcel-label' });
+      currentGroups[groupName].addLayer(labelMarker);
     }
 
     currentGroups[groupName].addLayer(featureLayer);
@@ -231,20 +316,29 @@ async function loadAndRender(forceRefresh) {
   refreshButton.disabled = true;
 
   const mapped = lastMapped.map(r => forceRefresh ? { ...r, geojson: null } : r);
-  const toFetch = mapped.filter(r => r.egrid && !r.geojson);
+  await resolveEgridLists(mapped, forceRefresh);
+  const toFetch = mapped.filter(r => r.egridList.length > 0 && !r.geojson);
   const errors = [];
   const updates = []; // {rowId, geojson}
 
   for (let i = 0; i < toFetch.length; i++) {
     const rec = toFetch[i];
-    setStatus(`Chargement des géométries... (${i + 1}/${toFetch.length})`, 'loading');
-    try {
-      const geometry = await fetchParcelGeometry(String(rec.egrid).trim());
-      rec.geojson = JSON.stringify(geometry);
+    const geometries = [];
+    for (let j = 0; j < rec.egridList.length; j++) {
+      const egrid = rec.egridList[j];
+      const progress = rec.egridList.length > 1 ? ` (parcelle ${j + 1}/${rec.egridList.length})` : '';
+      setStatus(`Chargement des géométries... (${i + 1}/${toFetch.length})${progress}`, 'loading');
+      try {
+        geometries.push(await fetchParcelGeometry(String(egrid).trim()));
+      } catch (err) {
+        errors.push(`${egrid}: ${err.message}`);
+        console.error(err);
+      }
+    }
+    if (geometries.length > 0) {
+      const combined = geometries.length === 1 ? geometries[0] : { type: 'GeometryCollection', geometries };
+      rec.geojson = JSON.stringify(combined);
       updates.push({ rowId: rec.id, geojson: rec.geojson });
-    } catch (err) {
-      errors.push(`${rec.egrid}: ${err.message}`);
-      console.error(err);
     }
   }
 
@@ -302,7 +396,7 @@ grist.onRecords((records, mappings) => {
 
 grist.ready({
   columns: [
-    { name: EGRID, type: 'Text', title: 'EGRID', description: 'Identifiant fédéral de la parcelle (ex: CH772637125650)' },
+    { name: EGRID, type: 'Any', title: 'EGRID', description: 'EGRID de la parcelle. Colonne texte (un EGRID, ou plusieurs séparés par des virgules), ou référence/liste de références vers une table de parcelles ayant elle-même une colonne "EGRID"' },
     { name: Name, type: 'Any', title: 'Nom', optional: true, description: 'Nom affiché dans la popup (ex: nom de la réserve ou n° de parcelle)' },
     { name: Layer, type: 'Any', title: 'Réserve', optional: true, description: 'Regroupe les parcelles par réserve/calque, activable/désactivable sur la carte' },
     { name: Label, type: 'Any', title: 'Étiquette', optional: true, description: 'Texte affiché en permanence sur la parcelle (ex: nom de la réserve)' },

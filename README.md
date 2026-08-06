@@ -15,7 +15,7 @@ Widget Grist personnalisé qui affiche sur une carte Leaflet les parcelles
 
 ## Mise en place dans Grist
 
-1. Héberger `map.html` et `map.js` (ex. GitHub Pages) et ajouter un
+1. Héberger `map.html` et `map.js` (actuellement sur Netlify) et ajouter un
    **Custom Widget** dans Grist pointant vers l'URL de `map.html`.
 2. Accorder l'accès **Full document access** au widget (nécessaire pour
    écrire le cache GeoJSON).
@@ -23,10 +23,27 @@ Widget Grist personnalisé qui affiche sur une carte Leaflet les parcelles
 
    | Champ du widget | Requis | Description |
    |---|---|---|
-   | **EGRID** | Oui | Colonne texte contenant l'EGRID de la parcelle |
+   | **EGRID** | Oui | Un ou plusieurs EGRID — voir "Une ou plusieurs parcelles par ligne" ci-dessous |
    | **Nom** | Non | Affiché dans la popup (ex. nom de la réserve) |
-   | **Réserve** | Non | Regroupe les parcelles en calques activables/désactivables |
+   | **Réserve** | Non | Regroupe les lignes en calques activables/désactivables |
+   | **Étiquette** | Non | Texte affiché en permanence sur la/les parcelle(s) |
    | **GeoJSON (cache)** | Non | Colonne texte où la géométrie est mise en cache |
 
 Sans colonne de cache mappée, le widget fonctionne quand même mais
 retélécharge la géométrie de chaque parcelle à chaque ouverture.
+
+## Une ou plusieurs parcelles par ligne
+
+La colonne **EGRID** accepte deux formats, utiles pour deux cas d'usage
+différents :
+
+- **Table "Parcelles"** (une ligne = une parcelle) : colonne texte avec un
+  seul EGRID.
+- **Table "Réserves"** (une ligne = plusieurs parcelles) : soit une colonne
+  texte avec plusieurs EGRID séparés par des virgules, soit une colonne de
+  référence (**Ref** ou **RefList**) vers une table de parcelles — la table
+  référencée doit alors avoir elle-même une colonne dont l'identifiant
+  (colId) est exactement `EGRID`.
+
+Dans les deux cas, les géométries de toutes les parcelles d'une ligne sont
+combinées et mises en cache ensemble dans la colonne GeoJSON de cette ligne.
