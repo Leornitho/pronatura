@@ -384,10 +384,16 @@ grist.onRecord((record, mappings) => {
   const effectiveMappings = mappings || lastMappings;
   const rec = mapRecord(record, effectiveMappings);
   const layer = recordLayers[rec.id];
-  if (layer) {
-    map.panTo(layer.getBounds ? layer.getBounds().getCenter() : layer.getLatLng());
-    layer.openPopup();
+  if (!layer) return;
+  if (layer.getBounds) {
+    // Padding of a third of the viewport on each side leaves the geometry
+    // occupying roughly the middle third of the map, with context around it.
+    const size = map.getSize();
+    map.fitBounds(layer.getBounds(), { padding: [size.x / 3, size.y / 3] });
+  } else if (layer.getLatLng) {
+    map.setView(layer.getLatLng(), 18);
   }
+  layer.openPopup();
 });
 
 grist.onRecords((records, mappings) => {
