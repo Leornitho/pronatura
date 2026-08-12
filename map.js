@@ -8,6 +8,8 @@ const Name = 'Name';
 const Layer = 'Layer';
 const GeoJSON = 'GeoJSON';
 const Label = 'Label';
+const ManualGeoJSON = 'ManualGeoJSON';
+const ManualArea = 'ManualArea';
 
 // ---- Swiss coordinate system (CH1903+ / LV95) ------------------------------------
 proj4.defs('EPSG:2056', '+proj=somerc +lat_0=46.9524055555556 +lon_0=7.43958333333333 +k_0=1 +x_0=2600000 +y_0=1200000 +ellps=bessel +towgs84=674.374,15.056,405.346,0,0,0,0 +units=m +no_defs');
@@ -19,6 +21,30 @@ L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
   maxZoom: 19
 }).addTo(map);
 
+// Holds manually-drawn perimeters (one per row, keyed via layer.rowId below).
+// Kept on the map permanently (rebuilt on every render) so it can be passed
+// once to L.Control.Draw's edit option, letting users reshape/delete these
+// shapes directly on the map with the standard leaflet-draw toolbar.
+const editableGroup = L.featureGroup().addTo(map);
+
+// ---- French localization for the leaflet-draw toolbar -----------------------------
+if (window.L && L.drawLocal) {
+  L.drawLocal.draw.toolbar.buttons.polygon = 'Dessiner un périmètre';
+  L.drawLocal.draw.toolbar.buttons.rectangle = 'Dessiner un rectangle';
+  L.drawLocal.draw.handlers.polygon.tooltip.start = 'Cliquez pour commencer à dessiner le périmètre.';
+  L.drawLocal.draw.handlers.polygon.tooltip.cont = 'Cliquez pour continuer à dessiner le périmètre.';
+  L.drawLocal.draw.handlers.polygon.tooltip.end = 'Cliquez sur le premier point pour fermer le périmètre.';
+  L.drawLocal.draw.handlers.rectangle.tooltip.start = 'Cliquez et glissez pour dessiner un rectangle.';
+  L.drawLocal.draw.handlers.simpleshape.tooltip.end = 'Relâchez la souris pour terminer.';
+  L.drawLocal.edit.toolbar.buttons.edit = 'Modifier un périmètre';
+  L.drawLocal.edit.toolbar.buttons.editDisabled = 'Aucun périmètre à modifier';
+  L.drawLocal.edit.toolbar.buttons.remove = 'Supprimer un périmètre';
+  L.drawLocal.edit.toolbar.buttons.removeDisabled = 'Aucun périmètre à supprimer';
+  L.drawLocal.edit.handlers.edit.tooltip.text = 'Faites glisser les poignées pour modifier le périmètre.';
+  L.drawLocal.edit.handlers.edit.tooltip.subtext = 'Cliquez sur Annuler pour ignorer les modifications.';
+  L.drawLocal.edit.handlers.remove.tooltip.text = 'Cliquez sur un périmètre pour le supprimer.';
+}
+
 const LAYER_COLORS = ['#d62728', '#1f77b4', '#2ca02c', '#9467bd', '#ff7f0e', '#17becf', '#8c564b', '#e377c2'];
 function colorForLayer(name) {
   let hash = 0;
@@ -28,10 +54,22 @@ function colorForLayer(name) {
 
 const statusEl = document.getElementById('status');
 const refreshButton = document.getElementById('refresh');
+const drawTargetEl = document.getElementById('drawTarget');
 
 function setStatus(message, type = 'info') {
   statusEl.textContent = message;
   statusEl.className = type === 'error' ? 'error' : type === 'loading' ? 'loading' : '';
+}
+
+// Shows which row a newly-drawn perimeter will be saved to (the row last
+// selected/clicked in the Grist table). Only relevant once ManualGeoJSON
+// is mapped, since that's what enables the draw toolbar.
+function updateDrawTarget(rec) {
+  if (!(lastMappings && lastMappings[ManualGeoJSON])) {
+    drawTargetEl.textContent = '';
+    return;
+  }
+  drawTargetEl.textContent = rec ? `Cible du dessin : ${rec.name || ('#' + rec.id)}` : 'Sélectionnez une ligne pour dessiner son périmètre';
 }
 
 // ---- Swiss geoportal lookup (geo.admin.ch) -----------------------------------------
@@ -126,9 +164,106 @@ let lastMappings = null;
 let loading = false;
 let pendingRerun = false;
 let pendingForce = false;
+let selectedRowId = null;  // row a newly-drawn perimeter will be saved to
+let drawControl = null;
 
 grist.on('message', (e) => {
   if (e.tableId) { selectedTableId = e.tableId; }
+});
+
+// Computes the geodesic area (m²) of a drawn polygon/rectangle layer,
+// using leaflet-draw's L.GeometryUtil (accounts for the earth's curvature,
+// unlike a flat planar shoelace formula on lat/lng coordinates).
+function computeLayerArea(layer) {
+  const latlngs = layer.getLatLngs();
+  const ring = Array.isArray(latlngs[0]) ? latlngs[0] : latlngs;
+  return Math.round(L.GeometryUtil.geodesicArea(ring) * 100) / 100;
+}
+
+// Adds/removes the leaflet-draw toolbar depending on whether ManualGeoJSON
+// is mapped — drawing is only meaningful once there's a column to save into.
+function ensureDrawControl() {
+  const manualColId = lastMappings && lastMappings[ManualGeoJSON];
+  if (manualColId && !drawControl) {
+    drawControl = new L.Control.Draw({
+      position: 'topright',
+      draw: {
+        polygon: { allowIntersection: false, showArea: true, metric: true },
+        rectangle: { showArea: true, metric: true },
+        polyline: false,
+        marker: false,
+        circle: false,
+        circlemarker: false,
+      },
+      edit: {
+        featureGroup: editableGroup,
+      },
+    });
+    map.addControl(drawControl);
+  } else if (!manualColId && drawControl) {
+    map.removeControl(drawControl);
+    drawControl = null;
+  }
+}
+
+async function saveManualGeometry(rowId, geometry, area) {
+  const values = { [lastMappings[ManualGeoJSON]]: JSON.stringify(geometry) };
+  if (lastMappings[ManualArea]) { values[lastMappings[ManualArea]] = area; }
+  await grist.docApi.applyUserActions([['UpdateRecord', selectedTableId, rowId, values]]);
+}
+
+map.on(L.Draw.Event.CREATED, async (e) => {
+  if (!selectedRowId) {
+    setStatus('Sélectionnez d\'abord une ligne dans le tableau pour lui associer ce périmètre.', 'error');
+    return;
+  }
+  if (!selectedTableId || !lastMappings || !lastMappings[ManualGeoJSON]) { return; }
+  // Show the shape immediately instead of waiting for the Grist round-trip;
+  // the next render() rebuilds editableGroup from scratch and replaces it.
+  e.layer.rowId = selectedRowId;
+  e.layer.setStyle?.({ dashArray: '6,6' });
+  editableGroup.addLayer(e.layer);
+  try {
+    const geometry = e.layer.toGeoJSON().geometry;
+    const area = computeLayerArea(e.layer);
+    await saveManualGeometry(selectedRowId, geometry, area);
+    setStatus('Périmètre manuel enregistré.', 'info');
+  } catch (err) {
+    console.error(err);
+    setStatus(`Erreur lors de l'enregistrement du périmètre : ${err.message}`, 'error');
+  }
+});
+
+map.on(L.Draw.Event.EDITED, async (e) => {
+  if (!selectedTableId || !lastMappings || !lastMappings[ManualGeoJSON]) { return; }
+  try {
+    const updates = [];
+    e.layers.eachLayer((layer) => {
+      if (layer.rowId == null) return;
+      updates.push(saveManualGeometry(layer.rowId, layer.toGeoJSON().geometry, computeLayerArea(layer)));
+    });
+    await Promise.all(updates);
+    setStatus('Périmètre(s) manuel(s) mis à jour.', 'info');
+  } catch (err) {
+    console.error(err);
+    setStatus(`Erreur lors de la mise à jour du périmètre : ${err.message}`, 'error');
+  }
+});
+
+map.on(L.Draw.Event.DELETED, async (e) => {
+  if (!selectedTableId || !lastMappings || !lastMappings[ManualGeoJSON]) { return; }
+  try {
+    const rowIds = [];
+    e.layers.eachLayer((layer) => { if (layer.rowId != null) rowIds.push(layer.rowId); });
+    if (rowIds.length === 0) return;
+    const values = { [lastMappings[ManualGeoJSON]]: rowIds.map(() => null) };
+    if (lastMappings[ManualArea]) { values[lastMappings[ManualArea]] = rowIds.map(() => null); }
+    await grist.docApi.applyUserActions([['BulkUpdateRecord', selectedTableId, rowIds, values]]);
+    setStatus('Périmètre(s) manuel(s) supprimé(s).', 'info');
+  } catch (err) {
+    console.error(err);
+    setStatus(`Erreur lors de la suppression du périmètre : ${err.message}`, 'error');
+  }
 });
 
 function mapRecord(rec, mappings) {
@@ -140,6 +275,7 @@ function mapRecord(rec, mappings) {
       layer: mappings[Layer] ? rec[mappings[Layer]] : null,
       geojson: mappings[GeoJSON] ? rec[mappings[GeoJSON]] : null,
       label: mappings[Label] ? rec[mappings[Label]] : null,
+      manualGeojson: mappings[ManualGeoJSON] ? rec[mappings[ManualGeoJSON]] : null,
     };
   }
   // Fallback for widgets configured before column mapping existed.
@@ -150,6 +286,7 @@ function mapRecord(rec, mappings) {
     layer: rec[Layer] ?? null,
     geojson: rec[GeoJSON] ?? null,
     label: rec[Label] ?? null,
+    manualGeojson: null,
   };
 }
 
@@ -235,6 +372,7 @@ function clearMap() {
   for (const name in currentGroups) { map.removeLayer(currentGroups[name]); }
   currentGroups = {};
   recordLayers = {};
+  editableGroup.clearLayers();
   if (layersControl) {
     map.removeControl(layersControl);
     layersControl = null;
@@ -248,10 +386,14 @@ function renderMap(mapped) {
   let shown = 0;
 
   for (const rec of mapped) {
-    if (!rec.geojson) continue;
+    // A manually-drawn perimeter overrides the EGRID-derived geometry for
+    // that row (used for reserves that only cover part of a parcel).
+    const isManual = !!rec.manualGeojson;
+    const rawGeojson = isManual ? rec.manualGeojson : rec.geojson;
+    if (!rawGeojson) continue;
     let geometry;
     try {
-      geometry = typeof rec.geojson === 'string' ? JSON.parse(rec.geojson) : rec.geojson;
+      geometry = typeof rawGeojson === 'string' ? JSON.parse(rawGeojson) : rawGeojson;
     } catch (e) {
       console.error(`GeoJSON invalide pour la ligne ${rec.id} (${(rec.egridList || []).join(', ')})`, e);
       continue;
@@ -269,10 +411,22 @@ function renderMap(mapped) {
       properties: { EGRID: egridDisplay, Name: rec.name, Layer: rec.layer, Label: rec.label },
       geometry
     }, {
-      style: { color: colorForLayer(groupName), weight: 2, fillOpacity: 0.25 }
+      style: isManual
+        ? { color: colorForLayer(groupName), weight: 2, fillOpacity: 0.25, dashArray: '6,6' }
+        : { color: colorForLayer(groupName), weight: 2, fillOpacity: 0.25 }
     });
     if (rec.name) {
-      featureLayer.bindPopup(String(rec.name));
+      featureLayer.bindPopup(String(rec.name) + (isManual ? ' (périmètre dessiné à la main)' : ''));
+    }
+
+    if (isManual) {
+      // Register each drawn sub-layer with its row id and expose it via the
+      // persistent editableGroup so the draw control's edit/delete toolbar
+      // can reshape or remove it directly on the map.
+      featureLayer.eachLayer(l => {
+        l.rowId = rec.id;
+        editableGroup.addLayer(l);
+      });
     }
 
     if (rec.label) {
@@ -293,9 +447,12 @@ function renderMap(mapped) {
     shown++;
   }
 
-  const groupNames = Object.keys(currentGroups);
-  if (groupNames.length > 1) {
-    layersControl = L.control.layers(null, currentGroups, { collapsed: true }).addTo(map);
+  const overlays = { ...currentGroups };
+  if (editableGroup.getLayers().length > 0) {
+    overlays['Périmètres manuels'] = editableGroup;
+  }
+  if (Object.keys(overlays).length > 1) {
+    layersControl = L.control.layers(null, overlays, { collapsed: true }).addTo(map);
   }
 
   if (bounds.isValid()) {
@@ -383,6 +540,8 @@ refreshButton.addEventListener('click', () => loadAndRender(true));
 grist.onRecord((record, mappings) => {
   const effectiveMappings = mappings || lastMappings;
   const rec = mapRecord(record, effectiveMappings);
+  selectedRowId = rec.id;
+  updateDrawTarget(rec);
   const layer = recordLayers[rec.id];
   if (!layer) return;
   if (layer.getBounds) {
@@ -399,6 +558,7 @@ grist.onRecord((record, mappings) => {
 grist.onRecords((records, mappings) => {
   if (mappings) { lastMappings = mappings; }
   lastMapped = records.map(r => mapRecord(r, lastMappings));
+  ensureDrawControl();
   loadAndRender(false);
 });
 
@@ -409,6 +569,8 @@ grist.ready({
     { name: Layer, type: 'Any', title: 'Réserve', optional: true, description: 'Regroupe les parcelles par réserve/calque, activable/désactivable sur la carte' },
     { name: Label, type: 'Any', title: 'Étiquette', optional: true, description: 'Texte affiché en permanence sur la parcelle (ex: nom de la réserve)' },
     { name: GeoJSON, type: 'Text', title: 'GeoJSON (cache)', optional: true, description: 'Colonne de cache : la géométrie récupérée depuis le géoportail suisse y est enregistrée pour éviter de la re-télécharger à chaque ouverture' },
+    { name: ManualGeoJSON, type: 'Text', title: 'Périmètre manuel (GeoJSON)', optional: true, description: 'Colonne texte où enregistrer le périmètre dessiné à la main sur la carte (remplace la géométrie EGRID pour cette ligne, utile quand seule une partie de la parcelle est concernée). Sélectionnez la ligne dans le tableau puis dessinez avec l\'outil polygone/rectangle en haut à droite de la carte' },
+    { name: ManualArea, type: 'Numeric', title: 'Surface manuelle (m²)', optional: true, description: 'Colonne numérique où la surface (m²) du périmètre dessiné à la main est automatiquement enregistrée' },
   ],
   requiredAccess: 'full',
   allowSelectBy: true,

@@ -28,9 +28,32 @@ Widget Grist personnalisé qui affiche sur une carte Leaflet les parcelles
    | **Réserve** | Non | Regroupe les lignes en calques activables/désactivables |
    | **Étiquette** | Non | Texte affiché en permanence sur la/les parcelle(s) |
    | **GeoJSON (cache)** | Non | Colonne texte où la géométrie est mise en cache |
+   | **Périmètre manuel (GeoJSON)** | Non | Colonne texte pour un périmètre dessiné à la main (voir ci-dessous) |
+   | **Surface manuelle (m²)** | Non | Colonne numérique, remplie automatiquement avec la surface du périmètre dessiné |
 
 Sans colonne de cache mappée, le widget fonctionne quand même mais
 retélécharge la géométrie de chaque parcelle à chaque ouverture.
+
+## Dessiner un périmètre à la main
+
+Certaines réserves ne couvrent qu'une partie d'une parcelle : pour ces
+lignes-là, on peut dessiner le périmètre exact sur la carte plutôt que
+d'utiliser la géométrie complète de la parcelle (EGRID).
+
+1. Mapper la colonne **Périmètre manuel (GeoJSON)** (et, si voulu,
+   **Surface manuelle (m²)**) sur des colonnes existantes de la table.
+   Cela fait apparaître un outil de dessin (polygone/rectangle) en haut à
+   droite de la carte.
+2. Sélectionner la ligne concernée dans le tableau Grist (la carte affiche
+   "Cible du dessin : …" dans la barre d'outils pour confirmer).
+3. Dessiner le périmètre avec l'outil polygone ou rectangle. Il est
+   automatiquement enregistré dans la ligne sélectionnée, avec sa surface.
+4. Un périmètre déjà dessiné peut être modifié (poignées) ou supprimé avec
+   les outils d'édition/suppression du même contrôle.
+
+Quand un périmètre manuel existe pour une ligne, il est affiché à la place
+de la géométrie EGRID (avec un contour en pointillés) et prend le dessus
+sur elle.
 
 ## Une ou plusieurs parcelles par ligne
 
