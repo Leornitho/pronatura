@@ -28,6 +28,7 @@ Widget Grist personnalisé qui affiche sur une carte Leaflet les parcelles
    | **Réserve** | Non | Regroupe les lignes en calques activables/désactivables |
    | **Étiquette** | Non | Texte affiché en permanence sur la/les parcelle(s) |
    | **GeoJSON (cache)** | Non | Colonne texte où la géométrie est mise en cache |
+   | **Surface (m²)** | Non | Colonne numérique, remplie automatiquement avec la surface de la géométrie EGRID (recalculée à chaque nouveau téléchargement depuis le géoportail) |
    | **Périmètre manuel (GeoJSON)** | Non | Colonne texte pour un périmètre dessiné à la main (voir ci-dessous) |
    | **Surface manuelle (m²)** | Non | Colonne numérique, remplie automatiquement avec la surface du périmètre dessiné |
 

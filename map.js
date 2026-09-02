@@ -7,6 +7,7 @@ const EGRID = 'EGRID';
 const Name = 'Name';
 const Layer = 'Layer';
 const GeoJSON = 'GeoJSON';
+const Area = 'Area';
 const Label = 'Label';
 const ManualGeoJSON = 'ManualGeoJSON';
 const ManualArea = 'ManualArea';
@@ -178,6 +179,35 @@ function computeLayerArea(layer) {
   const latlngs = layer.getLatLngs();
   const ring = Array.isArray(latlngs[0]) ? latlngs[0] : latlngs;
   return Math.round(L.GeometryUtil.geodesicArea(ring) * 100) / 100;
+}
+
+// Geodesic area (m²) of a single ring given as [lon, lat] pairs (GeoJSON order).
+function ringGeodesicArea(ring) {
+  return L.GeometryUtil.geodesicArea(ring.map(([lon, lat]) => L.latLng(lat, lon)));
+}
+
+function polygonGeodesicArea(coordinates) {
+  if (!coordinates.length) return 0;
+  let area = ringGeodesicArea(coordinates[0]);
+  for (let i = 1; i < coordinates.length; i++) { area -= ringGeodesicArea(coordinates[i]); } // subtract holes
+  return area;
+}
+
+// Total geodesic area (m²) of a GeoJSON geometry fetched from the geoportal —
+// possibly a Polygon, MultiPolygon, or a GeometryCollection combining several
+// parcels (see "Une ou plusieurs parcelles par ligne" in the README).
+function computeGeometryArea(geometry) {
+  if (!geometry) return 0;
+  switch (geometry.type) {
+    case 'Polygon':
+      return polygonGeodesicArea(geometry.coordinates);
+    case 'MultiPolygon':
+      return geometry.coordinates.reduce((sum, poly) => sum + polygonGeodesicArea(poly), 0);
+    case 'GeometryCollection':
+      return (geometry.geometries || []).reduce((sum, g) => sum + computeGeometryArea(g), 0);
+    default:
+      return 0;
+  }
 }
 
 // Adds/removes the leaflet-draw toolbar depending on whether ManualGeoJSON
@@ -478,7 +508,7 @@ async function loadAndRender(forceRefresh) {
   await resolveEgridLists(mapped, forceRefresh);
   const toFetch = mapped.filter(r => r.egridList.length > 0 && !r.geojson);
   const errors = [];
-  const updates = []; // {rowId, geojson}
+  const updates = []; // {rowId, geojson, area}
 
   for (let i = 0; i < toFetch.length; i++) {
     const rec = toFetch[i];
@@ -497,20 +527,24 @@ async function loadAndRender(forceRefresh) {
     if (geometries.length > 0) {
       const combined = geometries.length === 1 ? geometries[0] : { type: 'GeometryCollection', geometries };
       rec.geojson = JSON.stringify(combined);
-      updates.push({ rowId: rec.id, geojson: rec.geojson });
+      const area = Math.round(computeGeometryArea(combined) * 100) / 100;
+      updates.push({ rowId: rec.id, geojson: rec.geojson, area });
     }
   }
 
-  if (updates.length > 0 && selectedTableId && lastMappings && lastMappings[GeoJSON]) {
+  if (updates.length > 0 && selectedTableId && lastMappings && (lastMappings[GeoJSON] || lastMappings[Area])) {
     try {
+      const values = {};
+      if (lastMappings[GeoJSON]) { values[lastMappings[GeoJSON]] = updates.map(u => u.geojson); }
+      if (lastMappings[Area]) { values[lastMappings[Area]] = updates.map(u => u.area); }
       await grist.docApi.applyUserActions([[
         'BulkUpdateRecord',
         selectedTableId,
         updates.map(u => u.rowId),
-        { [lastMappings[GeoJSON]]: updates.map(u => u.geojson) }
+        values
       ]]);
     } catch (err) {
-      console.error('Impossible de mettre en cache les géométries dans Grist (accès en écriture requis) :', err);
+      console.error('Impossible de mettre en cache la géométrie/surface dans Grist (accès en écriture requis) :', err);
     }
   }
 
@@ -569,6 +603,7 @@ grist.ready({
     { name: Layer, type: 'Any', title: 'Réserve', optional: true, description: 'Regroupe les parcelles par réserve/calque, activable/désactivable sur la carte' },
     { name: Label, type: 'Any', title: 'Étiquette', optional: true, description: 'Texte affiché en permanence sur la parcelle (ex: nom de la réserve)' },
     { name: GeoJSON, type: 'Text', title: 'GeoJSON (cache)', optional: true, description: 'Colonne de cache : la géométrie récupérée depuis le géoportail suisse y est enregistrée pour éviter de la re-télécharger à chaque ouverture' },
+    { name: Area, type: 'Numeric', title: 'Surface (m²)', optional: true, description: 'Colonne numérique où la surface (m²) de la géométrie EGRID est automatiquement enregistrée à chaque téléchargement depuis le géoportail (recalculée lors d\'un "Actualiser depuis le géoportail")' },
     { name: ManualGeoJSON, type: 'Text', title: 'Périmètre manuel (GeoJSON)', optional: true, description: 'Colonne texte où enregistrer le périmètre dessiné à la main sur la carte (remplace la géométrie EGRID pour cette ligne, utile quand seule une partie de la parcelle est concernée). Sélectionnez la ligne dans le tableau puis dessinez avec l\'outil polygone/rectangle en haut à droite de la carte' },
     { name: ManualArea, type: 'Numeric', title: 'Surface manuelle (m²)', optional: true, description: 'Colonne numérique où la surface (m²) du périmètre dessiné à la main est automatiquement enregistrée' },
   ],
