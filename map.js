@@ -17,9 +17,28 @@ proj4.defs('EPSG:2056', '+proj=somerc +lat_0=46.9524055555556 +lon_0=7.439583333
 
 // ---- Map setup --------------------------------------------------------------------
 const map = L.map('map').setView([46.8, 8.2], 9);
-L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+
+const osmLayer = L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
   attribution: '&copy; OpenStreetMap contributors',
   maxZoom: 19
+}).addTo(map);
+
+const swissimageLayer = L.tileLayer('https://wmts.geo.admin.ch/1.0.0/ch.swisstopo.swissimage/default/current/3857/{z}/{x}/{y}.jpeg', {
+  attribution: '&copy; swisstopo SWISSIMAGE',
+  maxZoom: 20,
+  maxNativeZoom: 20
+});
+
+const swisstopoColorLayer = L.tileLayer('https://wmts.geo.admin.ch/1.0.0/ch.swisstopo.pixelkarte-farbe/default/current/3857/{z}/{x}/{y}.jpeg', {
+  attribution: '&copy; swisstopo',
+  maxZoom: 19,
+  maxNativeZoom: 18
+});
+
+L.control.layers({
+  'Fond OpenStreetMap': osmLayer,
+  'Orthophoto SWISSIMAGE': swissimageLayer,
+  'Carte nationale swisstopo (couleur)': swisstopoColorLayer
 }).addTo(map);
 
 // Holds manually-drawn perimeters (one per row, keyed via layer.rowId below).
